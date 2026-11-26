@@ -79,18 +79,23 @@ findu/
 │   │   ├── item.ts            # 失物/拾物相关接口
 │   │   ├── user.ts            # 用户认证与个人信息接口
 │   │   ├── message.ts         # 站内消息接口
-│   │   └── category.ts        # 分类接口
+│   │   ├── category.ts        # 分类接口
+│   │   └── favorite.ts       # 收藏接口
 │   ├── assets/                # 需经构建处理的静态资源（图片、字体、样式等）
 │   ├── components/            # 全局通用组件
 │   │   ├── ItemCard.vue       # 物品卡片
 │   │   ├── CategoryFilter.vue # 分类筛选器
 │   │   ├── SearchBar.vue      # 搜索栏
 │   │   ├── StatusBadge.vue    # 状态标签
-│   │   └── EmptyState.vue     # 空状态占位
+│   │   ├── EmptyState.vue     # 空状态占位
+│   │   ├── ImageUploader.vue  # 图片上传组件
+│   │   └── Pagination.vue     # 分页器
 │   ├── composables/           # 组合式函数（可复用逻辑）
 │   │   ├── use-item.ts        # 物品列表/详情逻辑
 │   │   ├── use-search.ts      # 搜索与筛选逻辑
-│   │   └── use-message.ts     # 消息轮询/订阅逻辑
+│   │   ├── use-message.ts     # 消息轮询/订阅逻辑
+│   │   ├── use-favorite.ts    # 收藏逻辑
+│   │   └── use-category.ts    # 分类树逻辑
 │   ├── layouts/               # 布局组件
 │   │   ├── DefaultLayout.vue  # 默认布局（头部 + 内容 + 底部）
 │   │   └── BlankLayout.vue     # 空白布局（登录/注册页）
@@ -100,7 +105,8 @@ findu/
 │   │   ├── user.ts            # 用户状态
 │   │   ├── item.ts            # 物品列表与详情状态
 │   │   ├── message.ts         # 消息状态
-│   │   └── category.ts        # 分类状态
+│   │   ├── category.ts        # 分类状态
+│   │   └── favorite.ts        # 收藏状态
 │   ├── styles/                # 全局样式与变量
 │   │   ├── variables.scss     # 设计令牌（颜色、间距、字号）
 │   │   ├── mixins.scss        # 通用 mixin
@@ -109,6 +115,7 @@ findu/
 │   │   ├── item.ts            # 物品相关类型
 │   │   ├── user.ts            # 用户相关类型
 │   │   ├── message.ts         # 消息相关类型
+│   │   ├── category.ts        # 分类相关类型
 │   │   └── api.ts             # API 响应封装类型
 │   ├── utils/                 # 工具函数
 │   │   ├── request.ts         # Axios 实例封装与拦截器
@@ -186,19 +193,21 @@ findu 采用 **单向数据流** 模型，数据从后端经服务层流入状�
 
 ### Store 划分
 
-| Store        | 文件              | 管理状态                                   | 核心 Actions                                |
-| ------------ | ----------------- | ------------------------------------------ | ------------------------------------------- |
-| useUserStore | `stores/user.ts`  | 登录态、用户信息、token                     | login, logout, fetchProfile                 |
-| useItemStore | `stores/item.ts`  | 物品列表、当前详情、筛选条件、分页           | fetchItems, fetchDetail, publishItem, updateStatus |
-| useMessageStore | `stores/message.ts` | 消息列表、未读数                          | fetchMessages, markAsRead                   |
-| useCategoryStore | `stores/category.ts` | 分类树                                | fetchCategories                             |
+| Store           | 文件              | 管理状态                                   | 核心 Actions                                |
+| --------------- | ----------------- | ------------------------------------------ | ------------------------------------------- |
+| useUserStore    | `stores/user.ts`  | 登录态、用户信息、token                     | login, logout, fetchProfile, updateProfile   |
+| useItemStore    | `stores/item.ts`  | 物品列表、当前详情、筛选条件、分页           | fetchItems, fetchDetail, publishItem, updateStatus, editItem, archiveItem |
+| useMessageStore | `stores/message.ts` | 消息列表、未读数、消息筛选                | fetchMessages, markAsRead, markAllRead, startPolling, stopPolling |
+| useCategoryStore | `stores/category.ts` | 分类树、当前选中分类                     | fetchCategories, selectCategory             |
+| useFavoriteStore | `stores/favorite.ts` | 收藏列表、收藏状态                         | fetchFavorites, toggleFavorite, removeFavorite |
 
 ### 设计原则
 
 - **单一数据源**：每个业务域的状态集中在一个 Store 中，组件不持有跨域状态。
 - **Action 驱动**：状态修改必须通过 Store 的 action，禁止组件直接改写 `state`。
 - **Getter 派生**：需要计算或过滤的状态通过 `getters` 派生，避免冗余存储。
-- **持久化策略**：仅 `useUserStore` 的 token 通过 `localStorage` 持久化，其余状态按需从服务端拉取。
+- **持久化策略**：`useUserStore` 的 token 与「记住我」选项通过 `localStorage` 持久化；其余状态按需从服务端拉取，不持久化。
+- **轮询生命周期**：`useMessageStore` 的轮询需配合页面可见性感知，避免后台无效请求。
 
 ### Store 结构示例
 
@@ -244,7 +253,20 @@ export const useItemStore = defineStore('item', () => {
     if (target) target.status = status
   }
 
-  return { items, currentDetail, query, loading, activeItems, fetchItems, publishItem, updateStatus }
+  async function editItem(id: string, data: Partial<ItemInfo>) {
+    const res = await itemApi.updateItem(id, data)
+    const target = items.value.find(i => i.id === id)
+    if (target) Object.assign(target, res.data)
+    return res.data
+  }
+
+  async function archiveItem(id: string) {
+    await itemApi.archiveItem(id)
+    const target = items.value.find(i => i.id === id)
+    if (target) target.status = 'archived'
+  }
+
+  return { items, currentDetail, query, loading, activeItems, fetchItems, publishItem, updateStatus, editItem, archiveItem }
 })
 ```
 
@@ -370,8 +392,69 @@ export function createFoundItem(data: Omit<ItemInfo, 'id' | 'status'>): ApiRespo
   return request.post('/items/found', data)
 }
 
+export function updateItem(id: string, data: Partial<ItemInfo>): ApiResponse<ItemInfo> {
+  return request.patch(`/items/${id}`, data)
+}
+
 export function updateItemStatus(id: string, status: ItemStatus): ApiResponse<void> {
   return request.patch(`/items/${id}/status`, { status })
+}
+
+export function archiveItem(id: string): ApiResponse<void> {
+  return request.patch(`/items/${id}/status`, { status: 'archived' })
+}
+```
+
+```typescript
+// api/favorite.ts
+import request from '@/utils/request'
+import type { ItemInfo } from '@/types/item'
+import type { ApiResponse, PaginatedData } from '@/types/api'
+
+export function getFavoriteList(params: { page: number; pageSize: number }): ApiResponse<PaginatedData<ItemInfo>> {
+  return request.get('/favorites', { params })
+}
+
+export function addFavorite(itemId: string): ApiResponse<void> {
+  return request.post('/favorites', { itemId })
+}
+
+export function removeFavorite(itemId: string): ApiResponse<void> {
+  return request.delete(`/favorites/${itemId}`)
+}
+```
+
+```typescript
+// api/message.ts
+import request from '@/utils/request'
+import type { MessageInfo, MessageType } from '@/types/message'
+import type { ApiResponse, PaginatedData } from '@/types/api'
+
+export function getMessageList(params: { type?: MessageType; read?: boolean; page: number; pageSize: number }): ApiResponse<PaginatedData<MessageInfo>> {
+  return request.get('/messages', { params })
+}
+
+export function getUnreadCount(): ApiResponse<number> {
+  return request.get('/messages/unread-count')
+}
+
+export function markAsRead(id: string): ApiResponse<void> {
+  return request.patch(`/messages/${id}/read`)
+}
+
+export function markAllAsRead(): ApiResponse<void> {
+  return request.patch('/messages/read-all')
+}
+```
+
+```typescript
+// api/category.ts
+import request from '@/utils/request'
+import type { Category } from '@/types/category'
+import type { ApiResponse } from '@/types/api'
+
+export function getCategoryTree(): ApiResponse<Category[]> {
+  return request.get('/categories/tree')
 }
 ```
 
@@ -448,14 +531,19 @@ export interface ItemInfo {
   type: ItemType
   title: string
   description: string
-  category: string
+  category: string               // 分类 ID
+  categoryName?: string           // 分类名称（后端冗余，减少前端映射）
   location: string
-  occurredAt: string          // ISO 8601 时间
-  images: string[]            // 图片 URL 列表
+  occurredAt: string             // 丢失 / 捡拾时间 (ISO 8601)
+  images: string[]                // 图片 URL 列表
   status: ItemStatus
   publisherId: string
   publisherName: string
+  publisherAvatar?: string
   contact: string
+  contactVisible: boolean        // 是否公开联系方式
+  isDeleted: boolean              // 软删除标记
+  favoriteCount: number           // 收藏数
   createdAt: string
   updatedAt: string
 }
@@ -467,6 +555,25 @@ export interface ItemQuery {
   keyword?: string
   page?: number
   pageSize?: number
+}
+
+export interface FavoriteRecord {
+  id: string
+  userId: string
+  itemId: string
+  createdAt: string
+}
+```
+
+```typescript
+// types/category.ts
+export interface Category {
+  id: string
+  name: string
+  parentId: string | null
+  icon?: string                  // 分类图标 URL 或图标名
+  sort: number                   // 排序权重
+  children?: Category[]          // 子分类
 }
 ```
 
@@ -500,9 +607,13 @@ export type MessageType = 'clue' | 'status' | 'system'
 export interface MessageInfo {
   id: string
   type: MessageType
-  content: string
-  itemId?: string
+  title: string                  // 消息标题
+  content: string                // 消息正文
+  itemId?: string                // 关联物品 ID（线索 / 状态消息）
+  receiverId: string             // 接收者 ID
+  senderId?: string              // 发送者 ID（系统消息为空）
   read: boolean
+  readAt?: string                // 已读时间
   createdAt: string
 }
 ```
@@ -512,26 +623,42 @@ export interface MessageInfo {
 ```
 寻物启事状态流转:
   searching ──→ found ──→ archived
-     │
-     └──→ archived (超时归档)
+      │
+      └──→ archived (下架 / 超时归档)
 
 拾物信息状态流转:
   pending ──→ returned ──→ archived
+      │
+      └──→ archived (下架 / 超时归档)
 ```
 
 ```typescript
 // types/item.ts (续)
-export const LOST_STATUS_FLOW: ItemStatus[] = ['searching', 'found', 'archived']
-export const FOUND_STATUS_FLOW: ItemStatus[] = ['pending', 'returned', 'archived']
+
+// 合法状态转换关系
+const VALID_TRANSITIONS: Record<ItemStatus, ItemStatus[]> = {
+  searching: ['found', 'archived'],
+  found:     ['archived'],
+  pending:   ['returned', 'archived'],
+  returned:  ['archived'],
+  archived:  [],  // 终态，不可再变更
+}
 
 export function canTransition(from: ItemStatus, to: ItemStatus): boolean {
-  const flows = [LOST_STATUS_FLOW, FOUND_STATUS_FLOW]
-  return flows.some(flow => {
-    const idx = flow.indexOf(from)
-    return idx !== -1 && idx < flow.length - 1 && flow[idx + 1] === to
-  })
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false
 }
 ```
+
+### 自动归档规则
+
+后端定时任务负责将超时物品自动归档，前端无需处理，但需响应归档后的状态同步：
+
+| 条件                  | 动作                          |
+| --------------------- | ----------------------------- |
+| `searching` 超过 30 天 | 自动转 `archived`，通知发布者  |
+| `pending` 超过 30 天   | 自动转 `archived`，通知发布者  |
+| `found` 超过 7 天      | 自动转 `archived`             |
+| `returned` 超过 7 天   | 自动转 `archived`             |
 
 ---
 
@@ -541,12 +668,14 @@ composables 封装可复用的业务逻辑，使视图组件保持轻量：
 
 | composable        | 职责                                             | 返回                                   |
 | ----------------- | ------------------------------------------------ | -------------------------------------- |
-| `useItem`         | 物品列表查询、详情获取、发布、状态变更            | items, detail, loading, actions         |
+| `useItem`         | 物品列表查询、详情获取、发布、状态变更、编辑、下架  | items, detail, loading, actions         |
 | `useSearch`       | 关键字搜索、防抖、筛选条件管理                    | keyword, results, filters, debouncedSearch |
-| `useMessage`      | 消息列表拉取、未读计数、标记已读                  | messages, unreadCount, markAsRead      |
+| `useMessage`      | 消息列表拉取、未读计数、标记已读、轮询控制          | messages, unreadCount, markAsRead, startPolling, stopPolling |
 | `usePagination`   | 分页状态管理                                      | currentPage, total, hasNext, next, prev |
 | `useImageUpload`  | 图片选择、压缩、上传                              | images, uploading, upload, remove      |
 | `useAuth`         | 登录态判断、权限守卫                              | isLoggedIn, currentUser, requireAuth   |
+| `useFavorite`     | 收藏 / 取消收藏、收藏状态管理                      | favorites, isFavorited, toggleFavorite |
+| `useCategory`     | 分类树拉取、分类选中状态管理                       | categories, selectedCategory, selectCategory |
 
 ### 示例：useSearch
 
@@ -691,8 +820,10 @@ Vite `build.rollupOptions.output.manualChunks` 将第三方依赖与业务代码
 | 第三方拆包       | `manualChunks` 将 vendor 与业务代码分离，提升缓存命中率       |
 | 图片懒加载       | `IntersectionObserver` 或 `loading="lazy"` 实现列表图片懒加载 |
 | 搜索防抖         | `useSearch` composable 中 300ms 防抖，减少无效请求           |
+| 收藏防抖         | `useFavorite` 中 500ms 防抖，合并收藏 / 取消操作              |
 | 列表虚拟滚动     | 大量物品列表采用虚拟滚动，仅渲染可视区域                     |
 | 请求缓存         | 分类等低频变更数据首次拉取后缓存在 Store 中                   |
+| 消息轮询优化      | 页面不可见时暂停轮询，可见时恢复，减少后台请求               |
 | 代码压缩         | Vite 生产构建默认启用 Terser 压缩 + CSS 压缩                 |
 | Gzip / Brotli   | 部署服务器开启压缩传输                                       |
 
@@ -723,7 +854,63 @@ Vite `build.rollupOptions.output.manualChunks` 将第三方依赖与业务代码
 
 ---
 
-## 十六、关键流程时序图
+## 十六、消息通知架构
+
+### 通知触发机制
+
+消息由后端在特定业务事件发生时生成，前端通过轮询拉取：
+
+```
+┌──────────────┐                        ┌──────────────┐
+│  用户操作     │                        │  后端服务     │
+├──────────────┤                        ├──────────────┤
+│ 发布拾物信息  │──匹配到寻物启事──▶     │ 生成线索消息  │
+│ 变更物品状态  │───────────────────▶     │ 生成状态消息  │
+│ 管理员操作    │───────────────────▶     │ 生成系统消息  │
+│ 定时归档任务  │───────────────────▶     │ 生成状态消息  │
+└──────────────┘                        └──────┬───────┘
+                                               │ 推送
+                                               ▼
+                                        ┌──────────────┐
+                                        │  前端消息中心  │
+                                        │  (轮询拉取)    │
+                                        └──────────────┘
+```
+
+### 消息类型
+
+| 类型       | `type` 值  | 触发场景                                   |
+| ---------- | ---------- | ------------------------------------------ |
+| 线索消息   | `clue`     | 他人发布了可能匹配的拾物 / 寻物信息          |
+| 状态消息   | `status`   | 收藏或关联的物品状态变更、自动归档           |
+| 系统消息   | `system`   | 平台公告、违规提醒、账号相关                 |
+
+### 轮询策略
+
+当前阶段采用轮询方案，保证实现简单可靠；未来可扩展为 WebSocket 实时推送。
+
+| 策略               | 实现                                                     |
+| ------------------ | -------------------------------------------------------- |
+| 轮询间隔            | 每 30 秒拉取一次未读消息数（`GET /messages/unread-count`） |
+| 页面可见性感知       | 监听 `document.visibilitychange`，页面不可见时暂停轮询    |
+| 页面恢复时立即拉取   | 页面重新可见时立即发起一次拉取，再恢复正常轮询             |
+| 进入消息中心         | 拉取完整消息列表（`GET /messages`），停止未读数轮询       |
+| 离开消息中心         | 恢复未读数轮询                                            |
+| 轮询控制            | `useMessageStore` 的 `startPolling` / `stopPolling` action |
+
+### 消息与状态变更联动
+
+物品状态变更（手动或自动归档）触发状态消息通知关联用户：
+
+```
+物品状态变更 ──▶ 后端生成状态消息 ──▶ 前端轮询拉取 ──▶ 更新未读角标
+                                                    ──▶ 用户点击查看 ──▶ 标记已读
+                                                    ──▶ 点击线索消息 ──▶ 跳转物品详情
+```
+
+---
+
+## 十七、关键流程时序图
 
 ### 失物发布与匹配流程
 
@@ -763,7 +950,7 @@ Vite `build.rollupOptions.output.manualChunks` 将第三方依赖与业务代码
 
 ---
 
-## 十七、技术选型汇总
+## 十八、技术选型汇总
 
 | 类别         | 选型               | 选型理由                                           |
 | ------------ | ------------------ | -------------------------------------------------- |
